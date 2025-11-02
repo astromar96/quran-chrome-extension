@@ -7,7 +7,42 @@ const Select = SelectPrimitive.Root
 
 const SelectGroup = SelectPrimitive.Group
 
-const SelectValue = SelectPrimitive.Value
+const SelectValue = React.forwardRef<
+  React.ElementRef<typeof SelectPrimitive.Value>,
+  React.ComponentPropsWithoutRef<typeof SelectPrimitive.Value>
+>(({ className, ...props }, ref) => {
+  // Get direction from document or parent - check both document and closest parent with dir
+  const getDirection = () => {
+    if (typeof document === 'undefined') return 'ltr';
+    
+    // First check document element
+    const docDir = document.documentElement.dir;
+    if (docDir === 'rtl' || docDir === 'ltr') return docDir as 'ltr' | 'rtl';
+    
+    // Fallback to body or default
+    const bodyDir = document.body?.getAttribute('dir');
+    if (bodyDir === 'rtl' || bodyDir === 'ltr') return bodyDir as 'ltr' | 'rtl';
+    
+    return 'ltr';
+  };
+  
+  const dir = getDirection();
+  const isRtl = dir === 'rtl';
+  
+  return (
+    <SelectPrimitive.Value
+      ref={ref}
+      dir={dir}
+      className={cn(
+        "line-clamp-1 block w-full",
+        isRtl ? "text-right" : "text-left",
+        className
+      )}
+      {...props}
+    />
+  );
+})
+SelectValue.displayName = SelectPrimitive.Value.displayName
 
 const SelectTrigger = React.forwardRef<
   React.ElementRef<typeof SelectPrimitive.Trigger>,
@@ -15,23 +50,24 @@ const SelectTrigger = React.forwardRef<
 >(({ className, children, dir, ...props }, ref) => {
   // Inherit dir from parent if not explicitly provided
   const effectiveDir = dir || (typeof document !== 'undefined' ? document.documentElement.dir : 'ltr') as 'ltr' | 'rtl';
+  const isRtl = effectiveDir === 'rtl';
   
   return (
     <SelectPrimitive.Trigger
       ref={ref}
       dir={effectiveDir}
       className={cn(
-        "flex h-10 w-full items-center justify-between rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 [&>span]:line-clamp-1",
-        effectiveDir === 'rtl' 
-          ? "[&>span]:text-right flex-row-reverse" 
-          : "[&>span]:text-left",
+        "flex h-10 w-full items-center rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
+        isRtl 
+          ? "flex-row-reverse justify-between [&>[data-placeholder]]:text-right [&>span]:block [&>span]:w-full [&>span]:text-right" 
+          : "justify-between [&>[data-placeholder]]:text-left [&>span]:block [&>span]:w-full [&>span]:text-left",
         className
       )}
       {...props}
     >
       {children}
       <SelectPrimitive.Icon asChild>
-        <ChevronDown className="h-4 w-4 opacity-50" />
+        <ChevronDown className="h-4 w-4 opacity-50 shrink-0" />
       </SelectPrimitive.Icon>
     </SelectPrimitive.Trigger>
   );
