@@ -4,7 +4,7 @@
   "description": "Chrome extension for playing Quran recitations",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "vite build --watch",
     "build": "vite build",
     "preview": "vite preview",
     "build:watch": "vite build --watch"

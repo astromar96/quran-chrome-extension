@@ -34,7 +34,7 @@ const SelectValue = React.forwardRef<
       ref={ref}
       dir={dir}
       className={cn(
-        "line-clamp-1 block w-full",
+        "block w-full truncate text-foreground",
         isRtl ? "text-right" : "text-left",
         className
       )}
@@ -57,10 +57,10 @@ const SelectTrigger = React.forwardRef<
       ref={ref}
       dir={effectiveDir}
       className={cn(
-        "flex h-10 w-full items-center rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50",
+        "flex h-10 w-full items-center rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 min-w-0 gap-2",
         isRtl 
-          ? "flex-row-reverse justify-between [&>[data-placeholder]]:text-right [&>span]:block [&>span]:w-full [&>span]:text-right" 
-          : "justify-between [&>[data-placeholder]]:text-left [&>span]:block [&>span]:w-full [&>span]:text-left",
+          ? "flex-row-reverse justify-between [&>[data-placeholder]]:text-right [&>span]:block [&>span]:w-full [&>span]:text-right [&>span]:min-w-0 [&>span]:truncate" 
+          : "justify-between [&>[data-placeholder]]:text-left [&>span]:block [&>span]:w-full [&>span]:text-left [&>span]:min-w-0 [&>span]:truncate",
         className
       )}
       {...props}
@@ -184,7 +184,7 @@ const SelectItem = React.forwardRef<
         </SelectPrimitive.ItemIndicator>
       </span>
 
-      <SelectPrimitive.ItemText className={isRtl ? "text-right" : "text-left"}>
+      <SelectPrimitive.ItemText className={cn("truncate min-w-0", isRtl ? "text-right" : "text-left")}>
         {children}
       </SelectPrimitive.ItemText>
     </SelectPrimitive.Item>

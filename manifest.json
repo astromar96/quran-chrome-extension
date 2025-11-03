@@ -5,7 +5,8 @@
   "description": "Listen to Quran recitations with beautiful audio controls",
   "permissions": [
     "storage",
-    "sidePanel"
+    "sidePanel",
+    "offscreen"
   ],
   "host_permissions": [
     "https://mp3quran.net/*",

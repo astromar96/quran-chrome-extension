@@ -37,6 +37,10 @@ export default defineConfig({
         {
           src: 'icons',
           dest: '.'
+        },
+        {
+          src: 'src/offscreen.html',
+          dest: '.'
         }
       ]
     }),
@@ -52,16 +56,25 @@ export default defineConfig({
     rollupOptions: {
       input: {
         popup: resolve(__dirname, 'index.html'),
-        background: resolve(__dirname, 'src/background.ts')
+        background: resolve(__dirname, 'src/background.ts'),
+        offscreen: resolve(__dirname, 'src/offscreen.ts')
       },
       output: {
         entryFileNames: (chunkInfo) => {
-          return chunkInfo.name === 'background' ? 'background.js' : 'assets/[name].js';
+          if (chunkInfo.name === 'background') {
+            return 'background.js';
+          } else if (chunkInfo.name === 'offscreen') {
+            return 'offscreen.js';
+          }
+          return 'assets/[name].js';
         },
         chunkFileNames: 'assets/[name].js',
         assetFileNames: (assetInfo) => {
           if (assetInfo.name === 'index.html') {
             return 'popup.html';
+          }
+          if (assetInfo.name === 'offscreen.html') {
+            return 'offscreen.html';
           }
           return 'assets/[name].[ext]';
         }

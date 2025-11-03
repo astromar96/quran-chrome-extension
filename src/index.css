@@ -59,6 +59,12 @@
     @apply bg-background text-foreground;
   }
   
+  /* Ensure the extension container takes full width */
+  #root {
+    width: 100%;
+    max-width: 100%;
+  }
+  
   /* Arabic font support - Cairo */
   .font-arabic,
   [dir="rtl"],

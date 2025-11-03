@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Play, Pause, SkipForward, SkipBack, BookOpen, Headphones } from 'lucide-react';
+import { Play, Pause, SkipForward, SkipBack, BookOpen, Headphones, Volume2, VolumeX } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
   Select,
@@ -12,6 +12,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { storage } from '@/lib/storage';
 import { useLanguage } from '@/contexts/LanguageContext';
 import { Language } from '@/lib/i18n';
+import { audioService } from '@/lib/audioService';
 
 interface Moshaf {
   id: number;
@@ -56,8 +57,11 @@ function App() {
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [isSeeking, setIsSeeking] = useState(false);
-  const audioRef = useRef<HTMLAudioElement>(null);
+  const [volume, setVolume] = useState(1.0);
+  const [isMuted, setIsMuted] = useState(false);
+  const previousVolumeRef = useRef<number>(1.0);
   const progressRef = useRef<HTMLDivElement>(null);
+  const volumeRef = useRef<HTMLDivElement>(null);
 
   // Fetch reciters
   const fetchReciters = async (lang: Language = language) => {
@@ -120,6 +124,76 @@ function App() {
       prevLanguageRef.current = language;
     }
   }, [language, isLanguageLoaded]);
+
+  // Load volume preference on mount and sync with audio service
+  useEffect(() => {
+    const loadVolume = async () => {
+      const result = await storage.get(['volume']);
+      if (result.volume !== undefined) {
+        const savedVolume = parseFloat(result.volume);
+        if (!isNaN(savedVolume) && savedVolume >= 0 && savedVolume <= 1) {
+          setVolume(savedVolume);
+          previousVolumeRef.current = savedVolume;
+          await audioService.setVolume(savedVolume);
+        }
+      } else {
+        // Get current state from audio service
+        const state = await audioService.getState();
+        if (state.volume > 0) {
+          setVolume(state.volume);
+          previousVolumeRef.current = state.volume;
+        }
+      }
+    };
+    loadVolume();
+  }, []);
+
+  // Listen to audio state updates from offscreen document
+  useEffect(() => {
+    // Get initial state
+    audioService.getState().then((state) => {
+      setIsPlaying(state.isPlaying);
+      setCurrentTime(state.currentTime);
+      setDuration(state.duration);
+      setVolume(state.volume);
+      setIsMuted(state.isMuted);
+      previousVolumeRef.current = state.volume;
+    });
+
+    // Subscribe to updates
+    const unsubscribe = audioService.onStateUpdate((state) => {
+      setIsPlaying(state.isPlaying);
+      if (!isSeeking) {
+        setCurrentTime(state.currentTime);
+      }
+      setDuration(state.duration);
+      setVolume(state.volume);
+      setIsMuted(state.isMuted);
+    });
+
+    // Listen for audio ended to auto-play next surah
+    const handleMessage = (message: any) => {
+      if (message.type === 'AUDIO_ENDED') {
+        setIsPlaying(false);
+        setCurrentTime(0);
+        // Auto-play next surah if available
+        if (currentSurahIndex < surahs.length - 1 && selectedReciter && selectedMoshaf) {
+          const nextSurah = surahs[currentSurahIndex + 1];
+          setCurrentSurahIndex(currentSurahIndex + 1);
+          setSelectedSurah(nextSurah);
+          savePreferences(selectedReciter.id, selectedMoshaf.id, nextSurah.id);
+          loadAudio(selectedMoshaf, nextSurah);
+        }
+      }
+    };
+
+    chrome.runtime.onMessage.addListener(handleMessage);
+
+    return () => {
+      unsubscribe();
+      chrome.runtime.onMessage.removeListener(handleMessage);
+    };
+  }, [currentSurahIndex, surahs, selectedReciter, selectedMoshaf, isSeeking]);
 
   // Update preferences when reciters/surahs load
   useEffect(() => {
@@ -219,9 +293,8 @@ function App() {
 
   // Load audio
   const loadAudio = async (moshaf: Moshaf, surah: Surah) => {
-    if (!audioRef.current || !moshaf || !surah) {
-      console.error('Cannot load audio: missing audio element, moshaf, or surah', {
-        hasAudio: !!audioRef.current,
+    if (!moshaf || !surah) {
+      console.error('Cannot load audio: missing moshaf or surah', {
         moshaf,
         surah
       });
@@ -240,7 +313,6 @@ function App() {
     setIsLoadingAudio(true);
 
     const audioUrl = `${moshaf.server}${surah.id.toString().padStart(3, '0')}.mp3`;
-    const audio = audioRef.current;
     
     console.log('Loading audio:', {
       url: audioUrl,
@@ -255,58 +327,19 @@ function App() {
     setIsPlaying(false);
     setCurrentTime(0);
     setDuration(0);
-    audio.pause();
     
-    // Clear previous source first
-    audio.src = '';
-    audio.load();
-    
-    // Set new source - try without crossOrigin first as it may cause CORS issues
-    audio.src = audioUrl;
-    // Don't set crossOrigin as it may cause CORS errors if server doesn't support it
-    audio.preload = 'auto';
-    
-    // Load the new source
-    audio.load();
-    
-    // Wait a bit for the source to be set
-    await new Promise(resolve => setTimeout(resolve, 50));
-    
-    // Wait for metadata to be loaded before enabling play button
     try {
-      await new Promise<void>((resolve, reject) => {
-        const timeout = setTimeout(() => {
-          setIsLoadingAudio(false);
-          resolve();
-        }, 5000); // Fallback timeout
-
-        const handleLoadedMetadata = () => {
-          clearTimeout(timeout);
-          setIsLoadingAudio(false);
-          resolve();
-        };
-
-        const handleError = () => {
-          clearTimeout(timeout);
-          setIsLoadingAudio(false);
-          reject(new Error('Failed to load audio'));
-        };
-
-        audio.addEventListener('loadedmetadata', handleLoadedMetadata, { once: true });
-        audio.addEventListener('error', handleError, { once: true });
-
-        // If metadata is already loaded
-        if (audio.readyState >= HTMLMediaElement.HAVE_METADATA) {
-          clearTimeout(timeout);
-          audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
-          audio.removeEventListener('error', handleError);
-          setIsLoadingAudio(false);
-          resolve();
-        }
-      });
-    } catch (error) {
-      console.error('Error loading audio metadata:', error);
+      await audioService.loadAudio(audioUrl);
+      // Wait a bit for audio to load metadata
+      await new Promise(resolve => setTimeout(resolve, 100));
+      // Get updated state
+      const state = await audioService.getState();
+      setDuration(state.duration);
       setIsLoadingAudio(false);
+    } catch (error) {
+      console.error('Error loading audio:', error);
+      setIsLoadingAudio(false);
+      alert('Failed to load audio. Please try again.');
     }
   };
 
@@ -334,9 +367,8 @@ function App() {
 
   // Play/Pause toggle
   const togglePlayPause = async () => {
-    if (!audioRef.current || !selectedReciter || !selectedMoshaf || !selectedSurah) {
+    if (!selectedReciter || !selectedMoshaf || !selectedSurah) {
       console.error('Cannot play: missing requirements', {
-        hasAudio: !!audioRef.current,
         hasReciter: !!selectedReciter,
         hasMoshaf: !!selectedMoshaf,
         hasSurah: !!selectedSurah
@@ -351,145 +383,25 @@ function App() {
       return;
     }
 
-    const audio = audioRef.current;
-
     try {
       if (isPlaying) {
-        audio.pause();
+        await audioService.pause();
         return;
       }
 
-      // Always ensure audio is loaded before playing
-      const surahFileName = selectedSurah.id.toString().padStart(3, '0');
-      const currentSrc = audio.src || '';
-      
-      // Always reload to ensure fresh state
-      const needsReload = !currentSrc || !currentSrc.includes(surahFileName);
+      // Ensure audio is loaded before playing
+      // Check current state and reload if needed
+      const currentState = await audioService.getState();
+      const needsReload = !currentState.isPlaying && (duration === 0 || currentTime === 0);
       
       if (needsReload) {
         await loadAudio(selectedMoshaf, selectedSurah);
-        
-        // Wait for audio to be ready before playing
-        await new Promise<void>((resolve, reject) => {
-          if (!audio) {
-            reject(new Error('Audio element not available'));
-            return;
-          }
-
-          let resolved = false;
-          let timeoutId: number;
-
-          const cleanup = () => {
-            audio.removeEventListener('canplay', handleCanPlay);
-            audio.removeEventListener('canplaythrough', handleCanPlayThrough);
-            audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
-            audio.removeEventListener('error', handleError);
-            if (timeoutId) clearTimeout(timeoutId);
-          };
-
-          const handleCanPlay = () => {
-            if (!resolved) {
-              resolved = true;
-              cleanup();
-              console.log('Audio can play');
-              resolve();
-            }
-          };
-
-          const handleCanPlayThrough = () => {
-            if (!resolved) {
-              resolved = true;
-              cleanup();
-              console.log('Audio can play through');
-              resolve();
-            }
-          };
-
-          const handleLoadedMetadata = () => {
-            console.log('Audio metadata loaded, readyState:', audio.readyState);
-            // Check if we have enough data
-            if (audio.readyState >= HTMLMediaElement.HAVE_METADATA && !resolved) {
-              resolved = true;
-              cleanup();
-              resolve();
-            }
-          };
-
-          const handleError = (e: Event) => {
-            cleanup();
-            const error = audio.error;
-            console.error('Audio error:', {
-              code: error?.code,
-              message: error?.message,
-              mediaError: error,
-              event: e,
-              src: audio.src
-            });
-            
-            let errorMsg = 'Failed to load audio';
-            if (error) {
-              switch (error.code) {
-                case MediaError.MEDIA_ERR_ABORTED:
-                  errorMsg = 'Audio loading was aborted';
-                  break;
-                case MediaError.MEDIA_ERR_NETWORK:
-                  errorMsg = 'Network error loading audio';
-                  break;
-                case MediaError.MEDIA_ERR_DECODE:
-                  errorMsg = 'Audio decoding error';
-                  break;
-                case MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED:
-                  errorMsg = 'Audio format not supported or CORS issue';
-                  break;
-              }
-            }
-            reject(new Error(errorMsg));
-          };
-
-          audio.addEventListener('canplay', handleCanPlay, { once: true });
-          audio.addEventListener('canplaythrough', handleCanPlayThrough, { once: true });
-          audio.addEventListener('loadedmetadata', handleLoadedMetadata, { once: true });
-          audio.addEventListener('error', handleError, { once: true });
-          
-          // Check current ready state
-          if (audio.readyState >= HTMLMediaElement.HAVE_METADATA && audio.src) {
-            if (!resolved) {
-              resolved = true;
-              cleanup();
-              resolve();
-            }
-          }
-          
-          // Timeout fallback after 5 seconds
-          timeoutId = setTimeout(() => {
-            if (!resolved) {
-              resolved = true;
-              cleanup();
-              console.warn('Audio loading timeout, attempting to play anyway');
-              resolve();
-            }
-          }, 5000);
-        });
+        // Wait a bit for audio to be ready
+        await new Promise(resolve => setTimeout(resolve, 200));
       }
-
-      // Verify audio has a valid source before playing
-      if (!audio.src || audio.src === window.location.href) {
-        throw new Error('Audio source is not set');
-      }
-
-      // Check readyState
-      if (audio.readyState === HTMLMediaElement.HAVE_NOTHING) {
-        throw new Error('Audio has no data loaded');
-      }
-
-      console.log('Attempting to play audio:', {
-        src: audio.src,
-        readyState: audio.readyState,
-        networkState: audio.networkState
-      });
 
       // Play the audio
-      await audio.play();
+      await audioService.play();
       console.log('Audio play started successfully');
     } catch (error) {
       console.error('Error playing audio:', error);
@@ -516,15 +428,24 @@ function App() {
   // Format time helper
   const formatTime = (seconds: number): string => {
     if (!isFinite(seconds) || isNaN(seconds)) return '0:00';
-    const mins = Math.floor(seconds / 60);
-    const secs = Math.floor(seconds % 60);
+    
+    const totalSeconds = Math.floor(seconds);
+    const hours = Math.floor(totalSeconds / 3600);
+    const mins = Math.floor((totalSeconds % 3600) / 60);
+    const secs = totalSeconds % 60;
+    
+    // Show hours if 60 minutes or more
+    if (hours > 0) {
+      return `${hours}:${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+    }
+    
+    // Otherwise show MM:SS format
     return `${mins}:${secs.toString().padStart(2, '0')}`;
   };
 
   // Handle progress bar click/drag
   const handleProgressClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const audio = audioRef.current;
-    if (!audio || !duration) return;
+    if (!duration) return;
 
     const rect = progressRef.current?.getBoundingClientRect();
     if (!rect) return;
@@ -534,7 +455,7 @@ function App() {
     const percentage = Math.max(0, Math.min(1, clickX / width));
     const newTime = percentage * duration;
 
-    audio.currentTime = newTime;
+    audioService.setTime(newTime);
     setCurrentTime(newTime);
   };
 
@@ -544,25 +465,54 @@ function App() {
     handleProgressClick(e);
   };
 
+  // Handle volume change
+  const handleVolumeClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (!volumeRef.current) return;
+
+    const rect = volumeRef.current.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const width = rect.width;
+    const percentage = Math.max(0, Math.min(1, clickX / width));
+    const newVolume = percentage;
+
+    setVolume(newVolume);
+    setIsMuted(newVolume === 0);
+    previousVolumeRef.current = newVolume > 0 ? newVolume : previousVolumeRef.current;
+    audioService.setVolume(newVolume);
+    storage.set({ volume: newVolume.toString() });
+  };
+
+  // Handle volume drag
+  const [isVolumeSeeking, setIsVolumeSeeking] = useState(false);
+  const handleVolumeMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    setIsVolumeSeeking(true);
+    handleVolumeClick(e);
+  };
+
   useEffect(() => {
     const handleMouseMove = (e: MouseEvent) => {
-      if (!isSeeking || !audioRef.current || !duration || !progressRef.current) return;
+      if (!isVolumeSeeking || !volumeRef.current) return;
       
-      const rect = progressRef.current.getBoundingClientRect();
+      const rect = volumeRef.current.getBoundingClientRect();
       const clickX = e.clientX - rect.left;
       const width = rect.width;
       const percentage = Math.max(0, Math.min(1, clickX / width));
-      const newTime = percentage * duration;
+      const newVolume = percentage;
       
-      audioRef.current.currentTime = newTime;
-      setCurrentTime(newTime);
+      setVolume(newVolume);
+      setIsMuted(newVolume === 0);
+      previousVolumeRef.current = newVolume > 0 ? newVolume : previousVolumeRef.current;
+      audioService.setVolume(newVolume);
     };
 
     const handleMouseUp = () => {
-      setIsSeeking(false);
+      if (isVolumeSeeking) {
+        storage.set({ volume: volume.toString() });
+      }
+      setIsVolumeSeeking(false);
     };
 
-    if (isSeeking) {
+    if (isVolumeSeeking) {
       window.addEventListener('mousemove', handleMouseMove);
       window.addEventListener('mouseup', handleMouseUp);
       
@@ -571,93 +521,60 @@ function App() {
         window.removeEventListener('mouseup', handleMouseUp);
       };
     }
-  }, [isSeeking, duration]);
+  }, [isVolumeSeeking, volume]);
 
-  // Handle audio events
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio) return;
-
-    const handlePlay = () => setIsPlaying(true);
-    const handlePause = () => setIsPlaying(false);
-    const handleTimeUpdate = () => {
-      if (!isSeeking) {
-        setCurrentTime(audio.currentTime);
-      }
-    };
-    const handleLoadedMetadata = () => {
-      setDuration(audio.duration);
-    };
-    const handleDurationChange = () => {
-      if (audio.duration && isFinite(audio.duration)) {
-        setDuration(audio.duration);
-      }
-    };
-    const handleEnded = async () => {
-      setIsPlaying(false);
-      setCurrentTime(0);
-      // Auto-play next surah if available
-      if (currentSurahIndex < surahs.length - 1 && selectedReciter && selectedMoshaf) {
-        const nextSurah = surahs[currentSurahIndex + 1];
-        setCurrentSurahIndex(currentSurahIndex + 1);
-        setSelectedSurah(nextSurah);
-        savePreferences(selectedReciter.id, selectedMoshaf.id, nextSurah.id);
-        await loadAudio(selectedMoshaf, nextSurah);
-      }
-    };
-
-    audio.addEventListener('play', handlePlay);
-    audio.addEventListener('pause', handlePause);
-    audio.addEventListener('timeupdate', handleTimeUpdate);
-    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
-    audio.addEventListener('durationchange', handleDurationChange);
-    audio.addEventListener('ended', handleEnded);
-
-    return () => {
-      audio.removeEventListener('play', handlePlay);
-      audio.removeEventListener('pause', handlePause);
-      audio.removeEventListener('timeupdate', handleTimeUpdate);
-      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
-      audio.removeEventListener('durationchange', handleDurationChange);
-      audio.removeEventListener('ended', handleEnded);
-    };
-  }, [selectedSurah, selectedReciter, selectedMoshaf, currentSurahIndex, surahs, isSeeking]);
+  // Toggle mute
+  const toggleMute = () => {
+    if (isMuted) {
+      // Unmute - restore previous volume
+      const newVolume = previousVolumeRef.current > 0 ? previousVolumeRef.current : 0.5;
+      setVolume(newVolume);
+      setIsMuted(false);
+      audioService.setVolume(newVolume);
+      storage.set({ volume: newVolume.toString() });
+    } else {
+      // Mute - save current volume before muting
+      previousVolumeRef.current = volume;
+      setIsMuted(true);
+      audioService.setMuted(true);
+    }
+  };
 
   if (isLoading) {
     return (
-      <div dir={direction} className={`w-[420px] min-h-[500px] bg-background islamic-pattern ${language === 'ar' ? 'font-arabic' : ''}`}>
+      <div dir={direction} className={`w-full max-w-full min-h-screen bg-background islamic-pattern ${language === 'ar' ? 'font-arabic' : ''} section-main-container section-loading`}>
         {/* Header Skeleton */}
-        <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm border-b border-emerald-100 dark:border-emerald-900">
-          <div className={`flex items-center ${direction === 'rtl' ? 'flex-row-reverse' : ''} justify-between px-4 py-3`}>
-            <div className="flex items-center gap-2">
-              <Skeleton className="h-5 w-5 rounded" />
-              <Skeleton className="h-7 w-32" />
+        <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm border-b border-emerald-100 dark:border-emerald-900 section-header section-header-skeleton">
+          <div className={`flex items-center ${direction === 'rtl' ? 'flex-row-reverse' : ''} justify-between px-3 sm:px-4 py-2 sm:py-3`}>
+            <div className="flex items-center gap-2 min-w-0 flex-1">
+              <Skeleton className="h-5 w-5 rounded flex-shrink-0" />
+              <Skeleton className="h-6 sm:h-7 w-32" />
             </div>
-            <Skeleton className="h-8 w-20 rounded-md" />
+            <Skeleton className="h-8 w-16 sm:w-20 rounded-md flex-shrink-0" />
           </div>
         </div>
 
-        <div className="p-4 flex flex-col gap-4">
+        <div className="p-3 sm:p-4 flex flex-col gap-3 sm:gap-4 section-content section-content-skeleton">
           {/* Reciter Select Skeleton */}
-          <div className={`flex flex-col gap-2 ${direction === 'rtl' ? 'text-right' : 'text-left'}`}>
+          <div className={`flex flex-col gap-2 ${direction === 'rtl' ? 'text-right' : 'text-left'} section-reciter-select section-reciter-select-skeleton`}>
             <Skeleton className={`h-4 w-16 ${direction === 'rtl' ? 'text-right' : 'text-left'}`} />
             <Skeleton className="h-10 w-full rounded-md" />
           </div>
 
           {/* Moshaf Select Skeleton */}
-          <div className={`flex flex-col gap-2 ${direction === 'rtl' ? 'text-right' : 'text-left'}`}>
+          <div className={`flex flex-col gap-2 ${direction === 'rtl' ? 'text-right' : 'text-left'} section-moshaf-select section-moshaf-select-skeleton`}>
             <Skeleton className={`h-4 w-24 ${direction === 'rtl' ? 'text-right' : 'text-left'}`} />
             <Skeleton className="h-10 w-full rounded-md" />
           </div>
 
           {/* Surah Select Skeleton */}
-          <div className={`flex flex-col gap-2 ${direction === 'rtl' ? 'text-right' : 'text-left'}`}>
+          <div className={`flex flex-col gap-2 ${direction === 'rtl' ? 'text-right' : 'text-left'} section-surah-select section-surah-select-skeleton`}>
             <Skeleton className={`h-4 w-16 ${direction === 'rtl' ? 'text-right' : 'text-left'}`} />
             <Skeleton className="h-10 w-full rounded-md" />
           </div>
 
           {/* Progress Bar Skeleton */}
-          <div className="mt-4 p-4 border border-border rounded-lg">
+          <div className="mt-4 p-4 border border-border rounded-lg section-audio-player section-audio-player-skeleton">
             <div className="mb-3">
               <Skeleton className="h-1.5 w-full rounded-full mb-2" />
               <div className="flex justify-between">
@@ -690,18 +607,18 @@ function App() {
   );
 
   return (
-    <div dir={direction} className={`w-[420px] min-h-[500px] bg-background islamic-pattern ${language === 'ar' ? 'font-arabic' : ''}`}>
+    <div dir={direction} className={`w-full max-w-full min-h-screen bg-background islamic-pattern ${language === 'ar' ? 'font-arabic' : ''} section-main-container`}>
       {/* Header with Language Switcher */}
-      <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm border-b border-emerald-100 dark:border-emerald-900">
-        <div className={`flex items-center ${direction === 'rtl' ? 'flex-row-reverse' : ''} justify-between px-4 py-3`}>
-          <div className="flex items-center gap-2">
+      <div className="sticky top-0 z-10 bg-background/95 backdrop-blur-sm border-b border-emerald-100 dark:border-emerald-900 section-header">
+        <div className={`flex items-center ${direction === 'rtl' ? 'flex-row-reverse' : ''} justify-between px-3 sm:px-4 py-2 sm:py-3`}>
+          <div className="flex items-center gap-2 min-w-0 flex-1">
             <QuranIcon />
-            <h1 className="text-xl font-semibold text-foreground">
+            <h1 className="text-lg sm:text-xl font-semibold text-foreground truncate">
               {t.title}
             </h1>
           </div>
           <Select value={language} onValueChange={(value) => setLanguage(value as Language)}>
-            <SelectTrigger className="w-20 h-8 border-border">
+            <SelectTrigger className="w-16 sm:w-20 h-8 border-border flex-shrink-0">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
@@ -712,10 +629,10 @@ function App() {
         </div>
       </div>
 
-      <div className="p-4 flex flex-col gap-4">
+      <div className="p-3 sm:p-4 flex flex-col gap-3 sm:gap-4 section-content">
       
       {/* Reciter Select */}
-      <div className={`flex flex-col gap-2 ${direction === 'rtl' ? 'text-right' : 'text-left'}`}>
+      <div className={`flex flex-col gap-2 ${direction === 'rtl' ? 'text-right' : 'text-left'} section-reciter-select`}>
         <label className={`flex items-center gap-2 text-sm font-medium text-foreground ${direction === 'rtl' ? 'text-right' : 'text-left'}`}>
           <Headphones className="h-4 w-4 text-emerald-600 dark:text-emerald-500" />
           {t.reciter}
@@ -727,10 +644,10 @@ function App() {
           <SelectTrigger className="h-10 border-border hover:border-emerald-300 dark:hover:border-emerald-700" dir={direction}>
             <SelectValue placeholder={t.selectReciter} />
           </SelectTrigger>
-          <SelectContent dir={direction}>
+          <SelectContent className="max-h-[300px] w-[var(--radix-select-trigger-width)] max-w-[90vw]" dir={direction}>
             {reciters.map((reciter) => (
               <SelectItem key={reciter.id} value={reciter.id.toString()} dir={direction}>
-                {reciter.name}
+                <span className="truncate">{reciter.name}</span>
               </SelectItem>
             ))}
           </SelectContent>
@@ -739,7 +656,7 @@ function App() {
 
       {/* Moshaf Select */}
       {selectedReciter && selectedReciter.moshaf && selectedReciter.moshaf.length > 0 && (
-        <div className={`flex flex-col gap-2 ${direction === 'rtl' ? 'text-right' : 'text-left'}`}>
+        <div className={`flex flex-col gap-2 ${direction === 'rtl' ? 'text-right' : 'text-left'} section-moshaf-select`}>
           <label className={`flex items-center gap-2 text-sm font-medium text-foreground ${direction === 'rtl' ? 'text-right' : 'text-left'}`}>
             <BookOpen className="h-4 w-4 text-emerald-600 dark:text-emerald-500" />
             {t.moshaf}
@@ -751,10 +668,10 @@ function App() {
             <SelectTrigger className="h-10 border-border hover:border-emerald-300 dark:hover:border-emerald-700" dir={direction}>
               <SelectValue placeholder={t.selectMoshaf} />
             </SelectTrigger>
-            <SelectContent dir={direction}>
+            <SelectContent className="max-h-[300px] w-[var(--radix-select-trigger-width)] max-w-[90vw]" dir={direction}>
               {selectedReciter.moshaf.map((moshaf) => (
                 <SelectItem key={moshaf.id} value={moshaf.id.toString()} dir={direction}>
-                  {moshaf.name}
+                  <span className="truncate">{moshaf.name}</span>
                 </SelectItem>
               ))}
             </SelectContent>
@@ -763,7 +680,7 @@ function App() {
       )}
 
       {/* Surah Select */}
-      <div className={`flex flex-col gap-2 ${direction === 'rtl' ? 'text-right' : 'text-left'}`}>
+      <div className={`flex flex-col gap-2 ${direction === 'rtl' ? 'text-right' : 'text-left'} section-surah-select`}>
         <label className={`flex items-center gap-2 text-sm font-medium text-foreground ${direction === 'rtl' ? 'text-right' : 'text-left'}`}>
           <BookOpen className="h-4 w-4 text-emerald-600 dark:text-emerald-500" />
           {t.surah}
@@ -775,10 +692,10 @@ function App() {
           <SelectTrigger className="h-10 border-border hover:border-emerald-300 dark:hover:border-emerald-700" dir={direction}>
             <SelectValue placeholder={t.selectSurah} />
           </SelectTrigger>
-          <SelectContent className="max-h-[300px]" dir={direction}>
+          <SelectContent className="max-h-[300px] w-[var(--radix-select-trigger-width)] max-w-[90vw]" dir={direction}>
             {surahs.map((surah) => (
               <SelectItem key={surah.id} value={surah.id.toString()} dir={direction}>
-                {surah.id}. {surah.name}
+                <span className="truncate">{surah.id}. {surah.name}</span>
               </SelectItem>
             ))}
           </SelectContent>
@@ -786,85 +703,121 @@ function App() {
       </div>
 
       {/* Audio Player Section */}
-      <div className="mt-4 p-4 border border-emerald-100 dark:border-emerald-900 rounded-lg bg-white/50 dark:bg-gray-900/50">
-        {/* Progress Bar */}
-        <div className="mb-3">
+      <div className="mt-4 p-3 sm:p-4 border border-emerald-100 dark:border-emerald-900 rounded-lg bg-white/50 dark:bg-gray-900/50 section-audio-player">
+        {/* Main Row: Progress Bar, Controls, Volume (all in one row on large screens) */}
+        <div className={`flex flex-col lg:flex-row items-center lg:items-center gap-3 lg:gap-4 ${direction === 'rtl' ? 'lg:flex-row-reverse' : ''}`}>
+          {/* Progress Bar */}
+          <div className="w-full lg:flex-1 lg:min-w-0 mb-3 lg:mb-0 section-progress-bar">
+            <div
+              ref={progressRef}
+              onClick={handleProgressClick}
+              onMouseDown={handleProgressMouseDown}
+              className="group relative h-1.5 bg-muted rounded-full cursor-pointer"
+            >
+              <div
+                className="absolute left-0 top-0 h-full bg-emerald-600 dark:bg-emerald-500 rounded-full"
+                style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
+              />
+              <div
+                className="absolute top-1/2 -translate-y-1/2 w-2.5 h-2.5 bg-emerald-600 dark:bg-emerald-500 rounded-full opacity-0 group-hover:opacity-100 transition-opacity border-2 border-background"
+                style={{ left: `calc(${duration > 0 ? (currentTime / duration) * 100 : 0}% - 5px)` }}
+              />
+            </div>
+            {/* Time Display */}
+            <div className="flex justify-between items-center mt-2 text-xs text-muted-foreground">
+              <span className="tabular-nums">{formatTime(currentTime)}</span>
+              <span className="tabular-nums">{formatTime(duration)}</span>
+            </div>
+          </div>
+
+          {/* Audio Controls */}
+          <div className="flex items-center justify-center gap-2 sm:gap-3 shrink-0 section-audio-controls">
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={handlePrevious}
+              disabled={isLoadingAudio || currentSurahIndex === 0 || !selectedSurah}
+              className="h-9 w-9 sm:h-10 sm:w-10 rounded-full border-emerald-200 dark:border-emerald-800 hover:border-emerald-400 dark:hover:border-emerald-600 hover:text-emerald-600 dark:hover:text-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <SkipBack className="h-4 w-4" />
+            </Button>
+            
+            <Button
+              variant="default"
+              size="icon"
+              onClick={togglePlayPause}
+              disabled={isLoading || isLoadingAudio || !selectedSurah || !selectedReciter || !selectedMoshaf}
+              className="w-14 h-14 sm:w-16 sm:h-16 rounded-full bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isPlaying ? (
+                <Pause className="h-5 w-5" />
+              ) : (
+                <Play className="h-5 w-5 ml-0.5" />
+              )}
+            </Button>
+            
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={handleNext}
+              disabled={isLoadingAudio || currentSurahIndex === surahs.length - 1 || !selectedSurah}
+              className="h-9 w-9 sm:h-10 sm:w-10 rounded-full border-emerald-200 dark:border-emerald-800 hover:border-emerald-400 dark:hover:border-emerald-600 hover:text-emerald-600 dark:hover:text-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              <SkipForward className="h-4 w-4" />
+            </Button>
+          </div>
+
+          {/* Volume Control */}
+          <div className={`flex items-center gap-2 w-full lg:w-auto lg:shrink-0 lg:min-w-[180px] ${direction === 'rtl' ? 'flex-row-reverse' : ''} section-volume-control`}>
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={toggleMute}
+            className="h-8 w-8 shrink-0 text-muted-foreground hover:text-foreground"
+            title={isMuted || volume === 0 ? (language === 'ar' ? 'إلغاء كتم الصوت' : 'Unmute') : (language === 'ar' ? 'كتم الصوت' : 'Mute')}
+          >
+            {isMuted || volume === 0 ? (
+              <VolumeX className="h-4 w-4" />
+            ) : (
+              <Volume2 className="h-4 w-4" />
+            )}
+          </Button>
           <div
-            ref={progressRef}
-            onClick={handleProgressClick}
-            onMouseDown={handleProgressMouseDown}
-            className="group relative h-1.5 bg-muted rounded-full cursor-pointer"
+            ref={volumeRef}
+            onClick={handleVolumeClick}
+            onMouseDown={handleVolumeMouseDown}
+            className="group relative flex-1 h-1.5 bg-muted rounded-full cursor-pointer"
           >
             <div
               className="absolute left-0 top-0 h-full bg-emerald-600 dark:bg-emerald-500 rounded-full"
-              style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
+              style={{ width: `${(isMuted ? 0 : volume) * 100}%` }}
             />
             <div
-              className="absolute top-1/2 -translate-y-1/2 w-2.5 h-2.5 bg-emerald-600 dark:bg-emerald-500 rounded-full opacity-0 group-hover:opacity-100 transition-opacity border-2 border-background"
-              style={{ left: `calc(${duration > 0 ? (currentTime / duration) * 100 : 0}% - 5px)` }}
+              className="absolute top-1/2 -translate-y-1/2 w-3 h-3 bg-emerald-600 dark:bg-emerald-500 rounded-full opacity-0 group-hover:opacity-100 transition-opacity border-2 border-background"
+              style={{ left: `calc(${(isMuted ? 0 : volume) * 100}% - 6px)` }}
             />
           </div>
-          {/* Time Display */}
-          <div className="flex justify-between items-center mt-2 text-xs text-muted-foreground">
-            <span className="tabular-nums">{formatTime(currentTime)}</span>
-            <span className="tabular-nums">{formatTime(duration)}</span>
-          </div>
+          <span className={`text-xs text-muted-foreground w-8 tabular-nums shrink-0 ${direction === 'rtl' ? 'text-left' : 'text-right'}`}>
+            {Math.round((isMuted ? 0 : volume) * 100)}%
+          </span>
         </div>
-
-        {/* Audio Controls */}
-        <div className="flex items-center justify-center gap-3">
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={handlePrevious}
-            disabled={isLoadingAudio || currentSurahIndex === 0 || !selectedSurah}
-            className="h-10 w-10 rounded-full border-emerald-200 dark:border-emerald-800 hover:border-emerald-400 dark:hover:border-emerald-600 hover:text-emerald-600 dark:hover:text-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            <SkipBack className="h-4 w-4" />
-          </Button>
-          
-          <Button
-            variant="default"
-            size="icon"
-            onClick={togglePlayPause}
-            disabled={isLoading || isLoadingAudio || !selectedSurah || !selectedReciter || !selectedMoshaf}
-            className="w-16 h-16 rounded-full bg-emerald-600 hover:bg-emerald-700 dark:bg-emerald-500 dark:hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isPlaying ? (
-              <Pause className="h-5 w-5" />
-            ) : (
-              <Play className="h-5 w-5 ml-0.5" />
-            )}
-          </Button>
-          
-          <Button
-            variant="outline"
-            size="icon"
-            onClick={handleNext}
-            disabled={isLoadingAudio || currentSurahIndex === surahs.length - 1 || !selectedSurah}
-            className="h-10 w-10 rounded-full border-emerald-200 dark:border-emerald-800 hover:border-emerald-400 dark:hover:border-emerald-600 hover:text-emerald-600 dark:hover:text-emerald-400 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            <SkipForward className="h-4 w-4" />
-          </Button>
         </div>
       </div>
 
       {/* Current Surah Display */}
       {selectedSurah && (
-        <div className={`mt-3 p-3 rounded-md border border-emerald-100 dark:border-emerald-900 bg-emerald-50/50 dark:bg-emerald-950/30 ${direction === 'rtl' ? 'text-right' : 'text-center'}`}>
+        <div className={`mt-3 p-2.5 sm:p-3 rounded-md border border-emerald-100 dark:border-emerald-900 bg-emerald-50/50 dark:bg-emerald-950/30 ${direction === 'rtl' ? 'text-right' : 'text-center'} section-current-surah`}>
           <div className="flex items-center justify-center gap-1.5 mb-1">
-            <BookOpen className="h-3 w-3 text-emerald-600 dark:text-emerald-500" />
+            <BookOpen className="h-3 w-3 text-emerald-600 dark:text-emerald-500 flex-shrink-0" />
             <div className="text-xs font-medium text-emerald-700 dark:text-emerald-400">{t.playing}</div>
           </div>
-          <div className={`text-base font-semibold text-foreground ${direction === 'rtl' ? 'text-right' : 'text-center'}`}>
+          <div className={`text-sm sm:text-base font-semibold text-foreground truncate ${direction === 'rtl' ? 'text-right' : 'text-center'}`}>
             {selectedSurah.name}
           </div>
         </div>
       )}
       </div>
 
-      {/* Hidden Audio Element */}
-      <audio ref={audioRef} preload="none" />
     </div>
   );
 }
